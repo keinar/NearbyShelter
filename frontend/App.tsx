@@ -1,22 +1,68 @@
-import React, { useState } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import React, { useState, useCallback, useRef } from 'react';
+import { NavigationContainer, useNavigation } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { View, Text, Modal, TouchableOpacity, StyleSheet } from 'react-native';
+import Icon from 'react-native-vector-icons/MaterialIcons';
+import { useTranslation } from 'react-i18next';
+
+// Components
 import MapScreen from './components/MapScreen';
 import AddShelterScreen from './components/AddShelterScreen';
 import AdminLoginScreen from './components/AdminLoginScreen';
 import AdminManagementScreen from './components/AdminManagementScreen';
 import SettingsScreen from './components/SettingsScreen';
-import Icon from 'react-native-vector-icons/MaterialIcons';
-import { useTranslation } from 'react-i18next';
-import { View, Text, Modal, TouchableOpacity, StyleSheet } from 'react-native';
 import i18n from './i18n';
 
-const Tab = createBottomTabNavigator();
+// Types
+type RootStackParamList = {
+  MainTabs: undefined;
+  AdminLogin: undefined;
+  AdminManagement: undefined;
+};
 
-const App: React.FC = () => {
+const Tab = createBottomTabNavigator();
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+/**
+ * SecretLogo Component
+ * Handles the "7 clicks" logic to navigate to the Admin Login screen.
+ */
+const SecretLogo: React.FC = () => {
+  const navigation = useNavigation<any>();
+  const [clickCount, setClickCount] = useState(0);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleLogoPress = () => {
+    setClickCount((prev) => {
+      const newCount = prev + 1;
+      
+      // Reset count if too much time passes between clicks (2 seconds)
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => setClickCount(0), 2000);
+
+      if (newCount >= 7) {
+        setClickCount(0);
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        navigation.navigate('AdminLogin');
+      }
+      return newCount;
+    });
+  };
+
+  return (
+    <TouchableOpacity onPress={handleLogoPress} activeOpacity={0.7}>
+      <Text style={styles.logoText}>NearbyShelter</Text>
+    </TouchableOpacity>
+  );
+};
+
+/**
+ * MainTabs Component
+ * Wraps the main application screens accessible to all users.
+ */
+const MainTabs: React.FC = () => {
   const { t } = useTranslation();
-  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
-  const [customLocation, setCustomLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [languageModalVisible, setLanguageModalVisible] = useState(false);
 
   const changeLanguage = (lang: string) => {
@@ -24,63 +70,40 @@ const App: React.FC = () => {
     setLanguageModalVisible(false);
   };
 
-  const handleLocationUpdate = (latitude: number, longitude: number) => {
-    setCustomLocation({ latitude, longitude });
-    console.log('Custom location set:', { latitude, longitude });
-  };
+  const LanguageButton = () => (
+    <TouchableOpacity
+      style={styles.languageButton}
+      onPress={() => setLanguageModalVisible(true)}
+    >
+      <Text style={styles.languageButtonText}>{t('language')}</Text>
+    </TouchableOpacity>
+  );
 
   return (
-    <NavigationContainer>
+    <>
       <Tab.Navigator
         screenOptions={({ route }) => ({
           tabBarIcon: ({ color, size }) => {
-            let iconName;
-            if (route.name === 'Nearby' || route.name === 'בסביבה') {
-              iconName = 'place';
-            } else if (route.name === 'New' || route.name === 'הוספה') {
-              iconName = 'add-location';
-            } else if (route.name === 'Admin Login' || route.name === 'התחברות אדמין') {
-              iconName = 'lock';
-            } else if (route.name === 'Settings' || route.name === 'הגדרות') {
-              iconName = 'settings';
-            }
+            let iconName = 'help'; // Default
+            if (route.name === 'Nearby' || route.name === 'בסביבה') iconName = 'place';
+            else if (route.name === 'New' || route.name === 'הוספה') iconName = 'add-location';
+            else if (route.name === 'Settings' || route.name === 'הגדרות') iconName = 'settings';
             return <Icon name={iconName} size={size} color={color} />;
           },
           tabBarActiveTintColor: '#00008B',
-          tabBarInactiveTintColor: '#000', 
-          headerRight: () => (
-            <TouchableOpacity
-              style={styles.languageButton}
-              onPress={() => setLanguageModalVisible(true)}
-            >
-              <Text style={[{ color: 'white', fontWeight: 'bold' }]}>{t('language')}</Text>
-            </TouchableOpacity>
-          ),
+          tabBarInactiveTintColor: '#666',
+          headerTitle: () => <SecretLogo />, // The secret trigger is here
+          headerRight: () => <LanguageButton />,
         })}
       >
-        <Tab.Screen name={t('Nearby')}>
-          {() => <MapScreen customLocation={customLocation} />}
-        </Tab.Screen>
+        <Tab.Screen name={t('Nearby')} component={MapScreen} />
         <Tab.Screen name={t('New')} component={AddShelterScreen} />
-        
-        {!isAdminLoggedIn && (
-          <Tab.Screen name={t('admin_login')}>
-            {props => <AdminLoginScreen {...props} setIsAdminLoggedIn={setIsAdminLoggedIn} />}
-          </Tab.Screen>
-        )}
-
-        {isAdminLoggedIn && (
-          <Tab.Screen name={t('admin_login')} component={AdminManagementScreen} />
-        )}
-
-        <Tab.Screen name={t('admin_management')}>
-          {() => <SettingsScreen onLocationUpdate={handleLocationUpdate} />}
-        </Tab.Screen>
+        <Tab.Screen name={t('Settings')} component={SettingsScreen} />
       </Tab.Navigator>
 
       {/* Language Selection Modal */}
       <Modal
-        animationType="slide"
+        animationType="fade"
         transparent={true}
         visible={languageModalVisible}
         onRequestClose={() => setLanguageModalVisible(false)}
@@ -100,60 +123,94 @@ const App: React.FC = () => {
           </View>
         </View>
       </Modal>
+    </>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <NavigationContainer>
+      <Stack.Navigator>
+        <Stack.Screen 
+          name="MainTabs" 
+          component={MainTabs} 
+          options={{ headerShown: false }} 
+        />
+        <Stack.Screen 
+          name="AdminLogin" 
+          component={AdminLoginScreen} 
+          options={{ title: 'Admin Access', headerBackTitle: 'Back' }}
+        />
+        <Stack.Screen 
+          name="AdminManagement" 
+          component={AdminManagementScreen} 
+          options={{ title: 'Shelter Management', headerLeft: () => null }} // Disable back button on management screen
+        />
+      </Stack.Navigator>
     </NavigationContainer>
   );
 };
 
 const styles = StyleSheet.create({
+  logoText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#333',
+    letterSpacing: 1,
+  },
   languageButton: {
     marginRight: 15,
-    paddingVertical: 12,
-    padding: 10,
-    borderRadius: 5,
-    minHeight: 40,
-    backgroundColor: '#000',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#333',
   },
-  languageText: {
-    fontSize: 14,
-    color: '#000',
-    cursor: 'pointer',
+  languageButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 12,
   },
   modalContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.6)',
   },
   modalView: {
-    width: 250,
+    width: 280,
     backgroundColor: 'white',
-    borderRadius: 10,
-    padding: 20,
+    borderRadius: 16,
+    padding: 24,
     alignItems: 'center',
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    elevation: 5,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    elevation: 10,
   },
   modalTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: 'bold',
-    marginBottom: 15,
-    color: '#000',
+    marginBottom: 20,
+    color: '#333',
   },
   languageOption: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
+    paddingVertical: 12,
+    width: '100%',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  languageText: {
+    fontSize: 16,
+    color: '#333',
   },
   closeButton: {
     marginTop: 20,
-    padding: 10,
-    backgroundColor: '#000',
-    borderRadius: 5,
+    paddingVertical: 10,
+    paddingHorizontal: 30,
+    backgroundColor: '#333',
+    borderRadius: 8,
   },
   closeButtonText: {
     color: 'white',

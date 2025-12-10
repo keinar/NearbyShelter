@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, I18nManager } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, I18nManager, Alert } from 'react-native';
+import MapView, { Marker, Region } from 'react-native-maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Geolocation from '@react-native-community/geolocation';
 import axios from 'axios';
 import { Shelter } from '../utils/types';
-import { GOOGLE_MAPS_API_KEY } from '@env';
+import { GOOGLE_MAPS_API_KEY, API_URL } from '@env';
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import Icon from 'react-native-vector-icons/MaterialIcons';
@@ -18,284 +18,262 @@ interface SheltersMapProps {
 }
 
 const SheltersMap: React.FC<SheltersMapProps> = ({ initialLocation, locationName, shelters, onNavigate }) => {
+  const { t } = useTranslation();
+  const mapRef = useRef<MapView>(null);
+  
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(initialLocation || null);
-  const [defaultLocation, setDefaultLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [selectedShelter, setSelectedShelter] = useState<Shelter | null>(null);
   const [selectedAddress, setSelectedAddress] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
-  const [errorOccurred, setErrorOccurred] = useState(false);
   const [sheltersData, setSheltersData] = useState<Shelter[]>(shelters);
-  const { t } = useTranslation();
-  const [isRTL, setIsRTL] = useState(I18nManager.isRTL);
-  const mapRef = useRef<MapView>(null);
+  
+  // RTL support check
+  const isRTL = i18n.language === 'he';
 
+  // Fetch Current Location on Mount
   useEffect(() => {
-    const loadDefaultLocation = async () => {
-        const latitude = await AsyncStorage.getItem('defaultLatitude');
-        const longitude = await AsyncStorage.getItem('defaultLongitude');
+    if (!currentLocation) {
+        Geolocation.getCurrentPosition(
+            position => {
+                const { latitude, longitude } = position.coords;
+                setCurrentLocation({ latitude, longitude });
+            },
+            error => console.error('Error fetching GPS location:', error),
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+        );
+    }
+  }, [currentLocation]);
 
-        if (latitude && longitude) {
-            console.log("Using stored default location:", { latitude, longitude });
-            setDefaultLocation({
-                latitude: parseFloat(latitude),
-                longitude: parseFloat(longitude),
-            });
-            setCurrentLocation({
-                latitude: parseFloat(latitude),
-                longitude: parseFloat(longitude),
-            });
-        } else if (!currentLocation) {
-            console.log("Fetching current GPS location...");
-            Geolocation.getCurrentPosition(
-                position => {
-                    const { latitude, longitude } = position.coords;
-                    console.log("Fetched GPS location:", { latitude, longitude });
-                    setCurrentLocation({ latitude, longitude });
-                },
-                error => {
-                    console.error('Error fetching GPS location:', error);
-                },
-                { enableHighAccuracy: true, timeout: 8000, maximumAge: 1000 }
-            );
-        }
-    };
-    loadDefaultLocation();
-}, [initialLocation]);
-
-  const getExactAddress = async (latitude: number, longitude: number) => {
+  // Fetch Exact Address for Selected Shelter
+  const getExactAddress = useCallback(async (latitude: number, longitude: number) => {
     try {
-      const language = i18n.language === 'he' ? 'he' : 'en';
-      const response = await axios.get(
-        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_API_KEY}&language=${language}`
-      );
-      const addressComponents = response.data.results[0].address_components;
-      const streetNumber = addressComponents.find((component: any) =>
-        component.types.includes('street_number')
-      );
-      const route = addressComponents.find((component: any) =>
-        component.types.includes('route')
-      );
-      const formattedAddress = `${streetNumber?.long_name || ''} ${route?.long_name || ''}`;
-      setSelectedAddress(formattedAddress.trim());
+      const language = isRTL ? 'he' : 'en';
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_API_KEY}&language=${language}`;
+      const response = await axios.get(url);
+      
+      if (response.data.results && response.data.results.length > 0) {
+          const address = response.data.results[0].formatted_address;
+          setSelectedAddress(address);
+      } else {
+          setSelectedAddress(t('unknown_address'));
+      }
     } catch (error) {
       console.error('Error fetching address:', error);
-      setSelectedAddress('Unknown Address');
+      setSelectedAddress(t('unknown_address'));
     }
-  };
+  }, [isRTL, t]);
 
   const handleMarkerPress = (shelter: Shelter) => {
     setSelectedShelter(shelter);
     getExactAddress(shelter.latitude, shelter.longitude);
   };
 
-  const handleNavigatePress = () => {
-    if (selectedShelter) {
-      onNavigate(selectedShelter.latitude, selectedShelter.longitude);
-    }
-  };
-
-  const refreshShelters = async () => {
-    if (!currentLocation) {
-        console.log("No current location set, skipping refresh..."); // דיבוג: אין מיקום מוגדר
-        return;
-    }
-    console.log("Refreshing shelters for location:", currentLocation); // דיבוג תחילת רענון
+  // Logic to refresh shelters from both Backend and Google Places
+  const refreshShelters = useCallback(async () => {
+    if (!currentLocation) return;
 
     setIsLoading(true);
-    setErrorOccurred(false);
     try {
-        const savedRadius = await AsyncStorage.getItem('radius');
-        const radius = savedRadius ? parseInt(savedRadius, 10) : 5000;
+        const radius = parseInt((await AsyncStorage.getItem('radius')) || '5000', 10);
 
-        const mongoResponse = await axios.get('https://saferoute.digital-solution.co.il/api/shelters', {
-            params: {
-                latitude: currentLocation.latitude,
-                longitude: currentLocation.longitude,
-            },
-        });
+        // Fetch from our Backend
+        const backendPromise = axios.get(`${API_URL}/api/shelters`);
+        
+        // Fetch from Google Places
+        const googlePromise = axios.get(
+            `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${currentLocation.latitude},${currentLocation.longitude}&radius=${radius}&keyword=bomb+shelter&key=${GOOGLE_MAPS_API_KEY}`
+        );
 
-        const googleResponse = await axios.get(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${currentLocation.latitude},${currentLocation.longitude}&radius=${radius}&keyword=bomb+shelter&key=${GOOGLE_MAPS_API_KEY}`);
+        const [backendRes, googleRes] = await Promise.all([backendPromise, googlePromise]);
 
-        const mongoShelters = mongoResponse.data.map((shelter: Shelter) => ({
-            ...shelter,
-            title: t('bomb_shelter'),
+        const backendShelters = backendRes.data.map((s: Shelter) => ({
+            ...s,
+            title: t('bomb_shelter'), // Ensure consistent naming
         }));
 
-        const googleShelters = googleResponse.data.results.map((place: any) => ({
-            id: place.place_id,
+        const googleShelters = googleRes.data.results.map((place: any) => ({
+            _id: place.place_id,
             latitude: place.geometry.location.lat,
             longitude: place.geometry.location.lng,
             title: t('bomb_shelter'),
-            description: place.vicinity || 'Unknown Address',
+            description: place.vicinity || t('google_place'),
+            approved: true
         }));
 
-        const combinedShelters = [...mongoShelters, ...googleShelters];
-        setSheltersData(combinedShelters);
+        // Merge results, preferring Backend data if needed (logic can be expanded)
+        setSheltersData([...backendShelters, ...googleShelters]);
+
     } catch (error) {
-        console.error('Error fetching shelters:', error);
-        setErrorOccurred(true);
+        console.error('Error refreshing shelters:', error);
+        Alert.alert(t('error'), t('fetch_shelters_error'));
     } finally {
         setIsLoading(false);
     }
-};
+  }, [currentLocation, t]);
 
-useEffect(() => {
+  // Initial load
+  useEffect(() => {
     if (currentLocation) {
         refreshShelters();
     }
-}, [currentLocation]);
+  }, [currentLocation, refreshShelters]);
 
-  const goToDefaultLocation = () => {
-    console.log("goToDefaultLocation called");
-    const location = defaultLocation || currentLocation;
-
-    if (location) {
-      console.log("Navigating to location:", location);
-      setSelectedShelter(null);
-      mapRef.current?.animateToRegion({
-        ...location,
-        latitudeDelta: 0.01,
-        longitudeDelta: 0.01,
-      }, 1000);
-    } else {
-      console.log("No GPS location available.");
+  const recenterMap = () => {
+    if (currentLocation && mapRef.current) {
+        mapRef.current.animateToRegion({
+            ...currentLocation,
+            latitudeDelta: 0.015,
+            longitudeDelta: 0.015,
+        }, 800);
+        setSelectedShelter(null);
     }
   };
 
   if (!currentLocation) {
-    return <ActivityIndicator size="large" color="#0000ff" style={{ flex: 1 }} />;
+    return (
+        <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#00008B" />
+            <Text style={{marginTop: 10}}>{t('locating_you')}</Text>
+        </View>
+    );
   }
 
   return (
-    <View style={{ flex: 1 }}>
+    <View style={styles.container}>
       <MapView
         ref={mapRef}
-        style={{ flex: 1 }}
+        style={styles.map}
         initialRegion={{
           latitude: currentLocation.latitude,
           longitude: currentLocation.longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
+          latitudeDelta: 0.015,
+          longitudeDelta: 0.015,
         }}
         showsUserLocation={true}
         showsMyLocationButton={false}
       >
-        <Marker 
-          coordinate={currentLocation} 
-          title={locationName} 
-          pinColor="blue" 
-        />
         {sheltersData.map((shelter, index) => (
           <Marker
-            key={shelter.id ? `${shelter.id}-${shelter.latitude}-${shelter.longitude}` : `shelter-${index}`}
-            coordinate={{
-              latitude: shelter.latitude,
-              longitude: shelter.longitude,
-            }}
-            pinColor="darkred"
+            key={shelter._id || index}
+            coordinate={{ latitude: shelter.latitude, longitude: shelter.longitude }}
+            pinColor="red"
             onPress={() => handleMarkerPress(shelter)}
           />
         ))}
       </MapView>
 
-      <TouchableOpacity onPress={goToDefaultLocation} style={styles.customLocationButton}>
-          <Icon name="my-location" size={24} color="white" />
+      <TouchableOpacity onPress={recenterMap} style={styles.recenterButton}>
+          <Icon name="my-location" size={24} color="#333" />
+      </TouchableOpacity>
+
+      <TouchableOpacity onPress={refreshShelters} style={styles.refreshButton}>
+          <Icon name="refresh" size={24} color="#333" />
       </TouchableOpacity>
 
       {selectedShelter && (
-        <TouchableOpacity style={styles.shelterInfo}>
-          <Text style={[styles.title, { textAlign: isRTL ? 'left' : 'right' }]}>
-            {selectedShelter.title || t('bomb_shelter')}
-          </Text>
-          <Text style={[styles.address, { textAlign: isRTL ? 'left' : 'right' }]}>
-            {selectedAddress}
-          </Text>
-          <Text onPress={handleNavigatePress} style={styles.navigate}>{t('navigate')}</Text>
-        </TouchableOpacity>
-      )}
-
-      {errorOccurred && (
-        <View style={styles.refreshContainer}>
-          <Text>{t('refresh_shelters')}</Text>
-          <TouchableOpacity onPress={refreshShelters}>
-            <Text style={styles.refreshText}>{t('retry')}</Text>
-          </TouchableOpacity>
+        <View style={styles.cardContainer}>
+          <View style={styles.cardContent}>
+            <Text style={[styles.cardTitle, { textAlign: isRTL ? 'left' : 'right' }]}>
+                {selectedShelter.name || selectedShelter.title || t('bomb_shelter')}
+            </Text>
+            <Text style={[styles.cardAddress, { textAlign: isRTL ? 'left' : 'right' }]}>
+                {selectedAddress}
+            </Text>
+            <TouchableOpacity 
+                style={styles.navigateButton} 
+                onPress={() => onNavigate(selectedShelter.latitude, selectedShelter.longitude)}
+            >
+                <Text style={styles.navigateButtonText}>{t('navigate')}</Text>
+                <Icon name="navigation" size={20} color="white" style={{marginLeft: 8}} />
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
-      {isLoading && <ActivityIndicator size="large" color="#0000ff" style={styles.loader} />}
+      {isLoading && (
+        <View style={styles.loaderOverlay}>
+            <ActivityIndicator size="large" color="#00008B" />
+        </View>
+      )}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  customLocationButton: {
+  container: { flex: 1 },
+  map: { flex: 1 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  recenterButton: {
     position: 'absolute',
-    top: 20,
-    right: 20,
-    backgroundColor: '#333',
-    padding: 10,
-    borderRadius: 25,
-    elevation: 5,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  shelterInfo: {
-    position: 'absolute',
-    bottom: 0,
-    width: '100%',
+    top: 50,
+    right: 16,
     backgroundColor: 'white',
-    padding: 16,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
+    padding: 10,
+    borderRadius: 30,
+    elevation: 4,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
   },
-  buttonText: {
-    color: 'white',
-    fontWeight: 'bold',
+  refreshButton: {
+    position: 'absolute',
+    top: 110,
+    right: 16,
+    backgroundColor: 'white',
+    padding: 10,
+    borderRadius: 30,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
   },
-  title: {
+  cardContainer: {
+    position: 'absolute',
+    bottom: 24,
+    left: 16,
+    right: 16,
+    backgroundColor: 'white',
+    borderRadius: 12,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+  },
+  cardContent: {
+    padding: 16,
+  },
+  cardTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: 'black',
+    color: '#333',
+    marginBottom: 4,
   },
-  address: {
+  cardAddress: {
     fontSize: 14,
-    color: '#000',
-    marginBottom: 10,
+    color: '#666',
+    marginBottom: 16,
   },
-  loader: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -25 }, { translateY: -25 }],
-  },
-  navigate: {
-    backgroundColor: 'black',
-    paddingVertical: 12,
-    paddingHorizontal: 32,
-    borderRadius: 5,
-    width: '100%',
-    color: 'white',
-    textAlign: 'center',
-    fontWeight: 'bold',
-  },
-  refreshContainer: {
-    position: 'absolute',
-    bottom: 90,
-    width: '100%',
+  navigateButton: {
+    backgroundColor: '#00008B',
+    flexDirection: 'row',
+    justifyContent: 'center',
     alignItems: 'center',
+    paddingVertical: 12,
+    borderRadius: 8,
   },
-  refreshText: {
-    color: '#007AFF',
+  navigateButtonText: {
+    color: 'white',
+    fontSize: 16,
     fontWeight: 'bold',
-    textDecorationLine: 'underline',
-    marginTop: 8,
+    marginRight: 8,
   },
+  loaderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  }
 });
 
 export default SheltersMap;
